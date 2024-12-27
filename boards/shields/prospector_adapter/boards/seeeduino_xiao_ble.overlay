@@ -79,6 +79,12 @@ disp_spi: &spi3 {
    };
 };
 
+&st7789 {
+  width = <206>; // for 172px, viewport != memory
+  height = <320>;
+  y-offset = <0>;
+};
+
 &i2c0 {
    status = "okay";
 
