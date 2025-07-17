@@ -14,20 +14,20 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static sys_slist_t widgets = SYS_SLIST_STATIC_INIT(&widgets);
 
-// struct battery_bar_state {
-//     uint8_t index;
-// };
-
 bool initialized = false;
 
-struct battery_state {
-    bool bat_info;
-    bool peripheral_connected;
+// Simplified state structures for each event type
+struct battery_update_state {
     uint8_t source;
     uint8_t level;
 };
 
-static void set_battery_bar_value(lv_obj_t *widget, struct battery_state state) {
+struct connection_update_state {
+    uint8_t source;
+    bool connected;
+};
+
+static void set_battery_bar_value(lv_obj_t *widget, struct battery_update_state state) {
     if (initialized) {
         lv_obj_t *info_container = lv_obj_get_child(widget, state.source);
         lv_obj_t *bar = lv_obj_get_child(info_container, 0);
@@ -50,7 +50,7 @@ static void set_battery_bar_value(lv_obj_t *widget, struct battery_state state) 
     }
 }
 
-static void set_battery_bar_connected(lv_obj_t *widget, struct battery_state state) {
+static void set_battery_bar_connected(lv_obj_t *widget, struct connection_update_state state) {
     if (initialized) {
         lv_obj_t *info_container = lv_obj_get_child(widget, state.source);
         lv_obj_t *bar = lv_obj_get_child(info_container, 0);
@@ -58,10 +58,10 @@ static void set_battery_bar_connected(lv_obj_t *widget, struct battery_state sta
         lv_obj_t *nc_bar = lv_obj_get_child(info_container, 2);
         lv_obj_t *nc_num = lv_obj_get_child(info_container, 3);
 
-        LOG_DBG("Peripheral %d %s\n", state.source,
-                state.peripheral_connected ? "connected" : "disconnected");
+        LOG_DBG("Peripheral %d %s", state.source,
+                state.connected ? "connected" : "disconnected");
 
-        if (state.peripheral_connected) {
+        if (state.connected) {
             lv_obj_fade_out(nc_bar, 150, 0);
             lv_obj_fade_out(nc_num, 150, 0);
             lv_obj_fade_in(bar, 150, 250);
@@ -75,44 +75,58 @@ static void set_battery_bar_connected(lv_obj_t *widget, struct battery_state sta
     }
 }
 
-void battery_bar_update_cb(struct battery_state state) {
+// Battery event handling
+void battery_bar_battery_update_cb(struct battery_update_state state) {
+    LOG_DBG("Battery update: source=%d, level=%d", state.source, state.level);
+
     struct zmk_widget_battery_bar *widget;
     SYS_SLIST_FOR_EACH_CONTAINER(&widgets, widget, node) {
-        // set_battery_bar_value(widget->obj, state);
-        if (state.bat_info) {
-            set_battery_bar_value(widget->obj, state);
-        } else {
-            set_battery_bar_connected(widget->obj, state);
-        }
+        set_battery_bar_value(widget->obj, state);
     }
 }
 
-static struct battery_state battery_bar_get_state(const zmk_event_t *eh) {
+static struct battery_update_state battery_bar_get_battery_state(const zmk_event_t *eh) {
     const struct zmk_peripheral_battery_state_changed *bat_ev =
         as_zmk_peripheral_battery_state_changed(eh);
-    if (bat_ev != NULL) {
-        return (struct battery_state){
-            .bat_info = true,
-            .peripheral_connected = true,
-            .source = bat_ev->source,
-            .level = bat_ev->state_of_charge,
-        };
-    } else {
-        const struct zmk_split_central_status_changed *conn_ev =
-            as_zmk_split_central_status_changed(eh);
-        return (struct battery_state){
-            .bat_info = false,
-            .peripheral_connected = conn_ev->connected,
-            .source = conn_ev->slot,
-            .level = 0,
-        };
+
+    LOG_DBG("Received battery event: source=%d, level=%d", bat_ev->source, bat_ev->state_of_charge);
+
+    return (struct battery_update_state){
+        .source = bat_ev->source,
+        .level = bat_ev->state_of_charge,
+    };
+}
+
+// Connection event handling
+void battery_bar_connection_update_cb(struct connection_update_state state) {
+    LOG_DBG("Connection update: source=%d, connected=%s", state.source, state.connected ? "true" : "false");
+
+    struct zmk_widget_battery_bar *widget;
+    SYS_SLIST_FOR_EACH_CONTAINER(&widgets, widget, node) {
+        set_battery_bar_connected(widget->obj, state);
     }
 }
 
-ZMK_DISPLAY_WIDGET_LISTENER(widget_battery_bar, struct battery_state, battery_bar_update_cb,
-                            battery_bar_get_state);
-ZMK_SUBSCRIPTION(widget_battery_bar, zmk_peripheral_battery_state_changed);
-ZMK_SUBSCRIPTION(widget_battery_bar, zmk_split_central_status_changed);
+static struct connection_update_state battery_bar_get_connection_state(const zmk_event_t *eh) {
+    const struct zmk_split_central_status_changed *conn_ev =
+        as_zmk_split_central_status_changed(eh);
+
+    LOG_DBG("Received connection event: slot=%d, connected=%s", conn_ev->slot, conn_ev->connected ? "true" : "false");
+
+    return (struct connection_update_state){
+        .source = conn_ev->slot,
+        .connected = conn_ev->connected,
+    };
+}
+
+// Separate widget listeners for each event type
+ZMK_DISPLAY_WIDGET_LISTENER(widget_battery_bar_battery, struct battery_update_state,
+                            battery_bar_battery_update_cb, battery_bar_get_battery_state);
+ZMK_SUBSCRIPTION(widget_battery_bar_battery, zmk_peripheral_battery_state_changed);
+
+ZMK_DISPLAY_WIDGET_LISTENER(widget_battery_bar_connection, struct connection_update_state,
+                            battery_bar_connection_update_cb, battery_bar_get_connection_state);
+ZMK_SUBSCRIPTION(widget_battery_bar_connection, zmk_split_central_status_changed);
 
 int zmk_widget_battery_bar_init(struct zmk_widget_battery_bar *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);
@@ -180,7 +194,8 @@ int zmk_widget_battery_bar_init(struct zmk_widget_battery_bar *widget, lv_obj_t 
 
     sys_slist_append(&widgets, &widget->node);
 
-    widget_battery_bar_init();
+    widget_battery_bar_battery_init();
+    widget_battery_bar_connection_init();
     initialized = true;
 
     return 0;
